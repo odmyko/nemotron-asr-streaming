@@ -1,0 +1,10 @@
+.venv/
+model_cache/
+scripts/
+test_data/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.log
+.git/
+download_model.py

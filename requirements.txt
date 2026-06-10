@@ -1,0 +1,11 @@
+# Pinned to the NeMo main commit that ships EncDecRNNTBPEModelWithPrompt
+# (the prompt-conditioned cache-aware streaming class this model needs).
+nemo_toolkit[asr] @ git+https://github.com/NVIDIA/NeMo.git@73cfbcf9ce082a9754e3682f27096b6024bd7b8b
+fastapi==0.136.3
+uvicorn[standard]==0.49.0
+python-multipart==0.0.20
+websockets==16.0
+soundfile==0.14.0
+soxr==1.1.0
+numpy==2.4.6
+huggingface_hub==1.18.0

@@ -1,0 +1,13 @@
+# Model weights — download with ./scripts/download_model.sh (do NOT commit, ~2.4 GB)
+model_cache/
+
+# Python envs
+.venv/
+.venv-tools/
+__pycache__/
+*.pyc
+
+# Local tooling / logs
+.claude/
+*.log
+.DS_Store
