@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--minutes", type=float, default=0)
     parser.add_argument("--realtime", action="store_true")
     parser.add_argument("--min-speakers", type=int, default=1)
+    parser.add_argument("--report", help="Write full transcript and metrics to a JSON artifact")
     args = parser.parse_args()
     engine = ASREngine("model_cache/nemotron-3.5-asr-streaming-0.6b/nemotron-3.5-asr-streaming-0.6b.nemo")
     audio, sr = sf.read(args.audio, dtype="float32")
@@ -49,6 +50,7 @@ def main():
     max_step = 0
     compute_seconds = 0
     max_lag = 0
+    step_times = []
     for offset in range(0, audio.size, step):
         audio_time = min(offset + step, audio.size) / sr
         if args.realtime:
@@ -59,6 +61,7 @@ def main():
         if offset < min(audio.size, 16000 * 7):
             other.add_audio(audio[offset:offset + step])
         elapsed = time.perf_counter() - tick
+        step_times.append(elapsed)
         max_step = max(max_step, elapsed)
         compute_seconds += elapsed
         if args.realtime:
@@ -77,7 +80,7 @@ def main():
     fresh = backend.new_session()
     assert fresh.segments == [] and fresh.step_num == 0
     fresh.close()
-    print("RESULT", json.dumps({
+    report = {
         "plain_text": plain, "text": text, "segments": session.segments,
         "duration_sec": audio.size/sr, "elapsed_sec": time.perf_counter()-started,
         "first_partial_audio_sec": first_partial, "max_step_sec": max_step,
@@ -85,7 +88,18 @@ def main():
         "compute_sec": compute_seconds, "max_lag_sec": max_lag,
         "warmup_sec": warmup_seconds,
         "peak_gpu_bytes": torch.cuda.max_memory_allocated(),
-    }, ensure_ascii=False), flush=True)
+        "speakers": sorted({s["speaker_id"] for s in session.segments}),
+        "num_segments": len(session.segments),
+        "p95_step_sec": float(np.percentile(step_times, 95)),
+        "compute_real_time_factor": compute_seconds / (audio.size/sr),
+    }
+    if args.report:
+        destination = Path(args.report)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary = {k: v for k, v in report.items() if k not in ("segments", "text", "plain_text")}
+    summary["text_preview"] = text[:300]
+    print("RESULT", json.dumps(summary, ensure_ascii=False), flush=True)
     session.close()
 
 

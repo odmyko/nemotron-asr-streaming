@@ -23,6 +23,7 @@ os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
 
 import numpy as np
 import torch
+import anyio
 from fastapi import (
     FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket,
     WebSocketDisconnect,
@@ -221,7 +222,10 @@ async def ws_transcribe(
                 pass
     finally:
         if session is not None and hasattr(session, "close"):
-            await asyncio.to_thread(session.close)
+            # ASGI servers cancel disconnected handlers. Shield cleanup so the
+            # queued GPU operation finishes before its session caches are freed.
+            with anyio.CancelScope(shield=True):
+                await anyio.to_thread.run_sync(session.close)
         try:
             await ws.close()
         except RuntimeError:

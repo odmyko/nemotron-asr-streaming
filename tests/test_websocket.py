@@ -1,6 +1,7 @@
 """Transport contract tests with a deterministic recognizer, no model downloads."""
 import importlib
 import sys
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -81,6 +82,39 @@ class WebsocketTests(unittest.TestCase):
             ws.receive_json()
         self.assertTrue(self.sessions[-1].closed)
         self.assertFalse(self.sessions[-1].finished)
+
+    def test_cancelled_handler_waits_for_inflight_operation_before_cleanup(self):
+        started, release = threading.Event(), threading.Event()
+        gpu_lock = threading.Lock()
+
+        class BusySession(FakeSession):
+            def add_audio(self, samples):
+                with gpu_lock:
+                    started.set()
+                    if not release.wait(2):
+                        raise TimeoutError("Test operation did not finish")
+                    return super().add_audio(samples)
+
+            def close(self):
+                with gpu_lock:
+                    super().close()
+
+        session = BusySession()
+        self.api.diarization.new_session = lambda **kwargs: session
+        timer = None
+        try:
+            with self.client.websocket_connect("/ws/transcribe?diarize=true") as ws:
+                ws.receive_json()
+                ws.send_bytes(np.zeros(5120, dtype="<i2").tobytes())
+                self.assertTrue(started.wait(2))
+                timer = threading.Timer(.05, release.set)
+                timer.start()
+            self.assertTrue(session.closed)
+            self.assertFalse(session.finished)
+        finally:
+            release.set()
+            if timer is not None:
+                timer.join()
 
     def test_malformed_pcm_reports_error(self):
         with self.client.websocket_connect("/ws/transcribe") as ws:
