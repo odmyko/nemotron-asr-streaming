@@ -16,8 +16,9 @@ class Element {
   connect(){}
   disconnect(){}
 }
-async function harness(available=true){
+async function harness(available=true,failures=0){
   const elements={};
+  const retries=[];
   const document={querySelector:selector=>elements[selector]??=new Element(),
     createElement:tag=>new Element(tag),createDocumentFragment:()=>new Element('fragment'),
     createTextNode:text=>({textContent:text})};
@@ -38,11 +39,15 @@ async function harness(available=true){
   const context=vm.createContext({document,WebSocket,URLSearchParams,ArrayBuffer,DataView,
     location:{protocol:'http:',host:'localhost:8080'},window:{AudioContext},
     navigator:{mediaDevices:{getUserMedia:async()=>({getTracks:()=>[{stop(){}}]})}},
-    fetch:async url=>({json:async()=>url==='/health'?{diarization:{available}}:{languages:['auto','en-US']}})});
+    setTimeout:callback=>retries.push(callback),
+    fetch:async url=>{
+      if(url==='/health'&&failures-->0)throw new Error('Server starting');
+      return {ok:true,json:async()=>url==='/health'?{status:'ok',diarization:{available}}:{languages:['auto','en-US']}};
+    }});
   const source=fs.readFileSync('web/index.html','utf8').split('<script>')[1].split('</script>')[0];
   vm.runInContext(source,context);
   await new Promise(setImmediate);
-  return {elements,context,WebSocket,evaluate:expression=>vm.runInContext(expression,context)};
+  return {elements,context,WebSocket,retries,evaluate:expression=>vm.runInContext(expression,context)};
 }
 (async()=>{
   const ui=await harness();const e=ui.elements;
@@ -79,5 +84,11 @@ async function harness(available=true){
   const unavailable=await harness(false);
   assert.equal(unavailable.elements['#diarize'].disabled,true);
   assert.equal(unavailable.elements['#start'].disabled,false);
+  const starting=await harness(true,1);
+  assert.equal(starting.elements['#start'].disabled,true);
+  assert.match(starting.elements['#statusText'].textContent,/waiting for server/);
+  await starting.retries.shift()();
+  assert.equal(starting.elements['#start'].disabled,false);
+  assert.equal(starting.elements['#diarize'].disabled,false);
   console.log('UI lifecycle, revised snapshots, safe rendering, Clear, errors, restart: OK');
 })().catch(error=>{console.error(error);process.exitCode=1;});

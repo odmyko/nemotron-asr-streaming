@@ -350,6 +350,7 @@ and the API demo at `http://localhost:8000`. Enable it before Start. The page
 shows numbered speakers with consistent colors and updates their transcript
 while recording. Stop enters a finishing state until the server flushes the
 last audio. Clear clears displayed text without resetting speaker identities.
+When opened during model loading, the page waits and retries readiness checks automatically.
 
 Both models run inside the ASR container, using shared GPU weights and separate
 session caches. The implementation uses NVIDIA NeMo Speech's `SpeakerTaggedASR`
@@ -408,7 +409,7 @@ If inference fails, the UI preserves text already received.
 
 The coupled pipeline derives chunk geometry from ASR; `/health` reports the
 actual input buffer duration. This excludes compute, network, and initial model
-warmup/JIT compilation. Startup warms the diarizer before accepting connections;
+warmup/JIT compilation. Startup warms both ASR paths and speaker batch sizes before accepting connections;
 initial startup can take longer while Triton compiles GPU kernels. Compilation
 uses one worker (`TORCHINDUCTOR_COMPILE_THREADS=1`) to limit host memory usage.
 Diarization uses BF16 on supported CUDA devices to keep attention
@@ -437,6 +438,13 @@ step duration, input-buffer size, and peak allocated GPU memory. Use mono 16 kHz
 audio and a real multi-speaker fixture to assess speaker accuracy.
 The Node check exercises UI lifecycle, revised snapshots, Clear, errors, safe text
 rendering and restart using simulated microphone/transport adapters.
+
+A paced 600-second replay of NVIDIA's eight-voice demo on RTX 5090 completed in
+600.13 seconds of wall time, using 62.38 seconds of processing time (compute RTF
+0.104). It produced eight speaker channels; the 95th-percentile processing step
+was 93 ms and peak allocated GPU memory was approximately 4.88 GiB. The input
+buffer was 1.12 seconds. Startup compilation is handled by the warmup above.
+Save a full transcript/metrics artifact with `--report model_cache/validation/report.json`.
 
 References: [NVIDIA ASR integration guide](https://huggingface.co/nvidia/Nemotron-3-Diarization/blob/main/ASR_INTEGRATION_GUIDE.md),
 [diarization model](https://huggingface.co/nvidia/Nemotron-3-Diarization).

@@ -73,11 +73,12 @@ const langSel=$('#lang'), diarize=$('#diarize'), dot=$('#dot'), statusText=$('#s
 const transcript=$('#transcript'), hint=$('#hint'), uploadBtn=$('#upload');
 const colors=['#73a7ff','#6edbae','#ffbf73','#dc9bff','#ff8caa','#73dbe0','#cedb73','#c7b3a0'];
 let state='idle', active=null, history=[], current=[], clearPoint=0, diarAvailable=false;
+let serverReady=false, languagesLoaded=false;
 function setStatus(text, cls=''){statusText.textContent=text;dot.className='dot '+cls;}
 function controls(){
   const busy=state!=='idle';
-  startBtn.disabled=busy;stopBtn.disabled=state!=='recording';
-  langSel.disabled=busy;diarize.disabled=busy||!diarAvailable;uploadBtn.disabled=busy;
+  startBtn.disabled=busy||!serverReady;stopBtn.disabled=state!=='recording';
+  langSel.disabled=busy;diarize.disabled=busy||!diarAvailable;uploadBtn.disabled=busy||!serverReady;
   $('#fileInput').disabled=busy;
 }
 function render(){
@@ -133,7 +134,7 @@ function pcm16(samples){
   return data;
 }
 async function start(){
-  if(state!=='idle')return;
+  if(state!=='idle'||!serverReady)return;
   if(!navigator.mediaDevices?.getUserMedia){
     setStatus('Microphone requires localhost or HTTPS','err');return;
   }
@@ -205,17 +206,33 @@ uploadBtn.onclick=async()=>{
   }catch(error){setStatus('error','err');hint.textContent=String(error);}
   finally{state='idle';controls();}
 };
-fetch('/languages').then(r=>r.json()).then(data=>{
-  for(const language of data.languages||[]){
-    if(language==='auto')continue;const option=document.createElement('option');
-    option.value=option.textContent=language;langSel.append(option);
+async function initializeServer(){
+  try{
+    const response=await fetch('/health');
+    if(!response.ok)throw new Error('Server is loading');
+    const data=await response.json();
+    if(data.status!=='ok')throw new Error('Server is loading');
+    if(!languagesLoaded){
+      const languageResponse=await fetch('/languages');
+      if(!languageResponse.ok)throw new Error('Languages unavailable');
+      const languages=await languageResponse.json();
+      for(const language of languages.languages||[]){
+        if(language==='auto')continue;const option=document.createElement('option');
+        option.value=option.textContent=language;langSel.append(option);
+      }
+      languagesLoaded=true;
+    }
+    diarAvailable=!!data.diarization?.available;serverReady=true;
+    hint.textContent=diarAvailable?'Speaker labels belong to this recording and may update as you speak.':
+      (data.diarization?.detail||'Speaker separation is unavailable on this server.');
+    setStatus('idle');controls();
+  }catch(error){
+    serverReady=false;controls();setStatus('waiting for server...','wait');
+    hint.textContent='ASR is starting or reconnecting. This page will retry automatically.';
+    setTimeout(initializeServer,5000);
   }
-}).catch(()=>{hint.textContent='Could not reach API /languages.';});
-fetch('/health').then(r=>r.json()).then(data=>{
-  diarAvailable=!!data.diarization?.available;controls();
-  if(!diarAvailable)hint.textContent=data.diarization?.detail||'Speaker separation is unavailable on this server.';
-}).catch(()=>{hint.textContent='Could not check speaker separation availability.';});
-controls();render();
+}
+controls();render();initializeServer();
 </script>
 </body>
 </html>

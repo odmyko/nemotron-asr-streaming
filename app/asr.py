@@ -207,3 +207,11 @@ class ASREngine:
         s = self.new_session(lang=lang, strip_tags=strip_tags)
         s.add_audio(samples)
         return s.finalize()
+
+    def warmup(self):
+        """Initialize the native FP32 streaming path before reporting readiness."""
+        session = self.new_session()
+        silence = np.zeros(round(self.sample_rate * .32), dtype=np.float32)
+        for _ in range(4):
+            session.add_audio(silence)
+        session.finalize()

@@ -66,6 +66,7 @@ async def lifespan(app: FastAPI):
             diarization = None
             logging.getLogger(__name__).exception("Diarization unavailable; ordinary ASR remains enabled")
             diarization_error = str(exc)
+    await asyncio.to_thread(engine.warmup)
     yield
     diarization = None
     engine = None

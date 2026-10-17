@@ -90,8 +90,12 @@ class DiarizationEngine:
         session = self.new_session()
         try:
             silence = np.zeros(self.hop_samples, dtype=np.float32)
+            # Silence alone skips ASR via cache gating. Exercise each possible
+            # speaker batch too, so encoder/decoder kernels initialize at startup.
+            session.streamer._cache_gating = False
             # Fill both FIFO and speaker-cache geometries, including cache rollover.
-            for _ in range(48):
+            for step in range(48):
+                session.streamer.n_active_speakers_per_stream = step + 1 if step < 8 else 1
                 session.add_audio(silence)
             session.finalize()
         finally:
