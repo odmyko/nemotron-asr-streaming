@@ -1,6 +1,8 @@
-# Nemotron 3.5 ASR streaming — GPU inference server.
-# Mirrors the locally-validated Python 3.12 + torch cu124 + NeMo (git) stack.
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+# Nemotron 3.5 Streaming ASR
+# RTX 5090 / Blackwell SM120
+
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -8,33 +10,60 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1
 
-# System deps: ffmpeg (audio decoding), libsndfile1 (soundfile), Python 3.12.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        software-properties-common ca-certificates curl git ffmpeg libsndfile1 && \
-    add-apt-repository -y ppa:deadsnakes/ppa && apt-get update && \
+# System dependencies + Python 3.12
+RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        python3.12 python3.12-dev python3.12-venv && \
-    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12 && \
-    ln -sf /usr/bin/python3.12 /usr/local/bin/python && \
-    ln -sf /usr/bin/python3.12 /usr/local/bin/python3 && \
+    software-properties-common \
+    ca-certificates curl git ffmpeg libsndfile1 && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    python3.12 python3.12-dev python3.12-venv && \
+    python3.12 -m venv /opt/venv && \
     rm -rf /var/lib/apt/lists/*
 
-# Build deps then CUDA torch (cu124, matching the host driver / 3090).
-RUN python -m pip install --upgrade pip Cython packaging setuptools wheel && \
-    python -m pip install torch==2.6.0 torchaudio==2.6.0 \
-        --index-url https://download.pytorch.org/whl/cu124
+# Isolate application packages from Ubuntu's system Python packages (e.g. PyGObject).
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:${PATH}"
 
-# NeMo (from git) + serving deps. This layer is the slow one; keep it cached.
+# Build tools
+RUN python -m pip install --upgrade \
+    pip Cython packaging setuptools wheel
+
+# PyTorch CUDA 12.8
+RUN python -m pip install \
+    torch==2.7.1+cu128 \
+    torchaudio==2.7.1+cu128 \
+    --index-url https://download.pytorch.org/whl/cu128
+
+# Install NeMo and its dependencies.
+# Extra PyTorch index allows resolver to locate CUDA wheels.
 COPY requirements.txt /tmp/requirements.txt
-RUN python -m pip install -r /tmp/requirements.txt
 
+RUN python -m pip install \
+    -r /tmp/requirements.txt \
+    --extra-index-url https://download.pytorch.org/whl/cu128
+
+# Validate dependency compatibility
+RUN python -m pip check
+
+# Inspect compiled CUDA architectures without requiring GPU access during the build.
+RUN python -c "import torch; \
+    arch_flags = torch._C._cuda_getArchFlags().split(); \
+    print('PyTorch:', torch.__version__); \
+    print('CUDA:', torch.version.cuda); \
+    print('Architectures:', arch_flags); \
+    assert torch.__version__.startswith('2.7.1+cu128'); \
+    assert 'sm_120' in arch_flags"
+
+# Application
 WORKDIR /app
 COPY app/ /app/app/
 
-# Model is mounted at runtime (see docker-compose.yml / README) to keep the
-# image small and reuse the on-disk download cache.
 ENV MODEL_PATH=/models/nemotron-3.5-asr-streaming-0.6b/nemotron-3.5-asr-streaming-0.6b.nemo \
     ASR_DEVICE=cuda
 
 EXPOSE 8000
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+CMD ["python", "-m", "uvicorn", "app.main:app", \
+    "--host", "0.0.0.0", "--port", "8000"]

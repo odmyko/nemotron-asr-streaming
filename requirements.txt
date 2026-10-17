@@ -1,11 +1,25 @@
-# Pinned to the NeMo main commit that ships EncDecRNNTBPEModelWithPrompt
-# (the prompt-conditioned cache-aware streaming class this model needs).
+# NVIDIA Nemotron 3.5 Streaming ASR
+# RTX 5090 - Blackwell sm_120
+# CUDA 12.8
+
+# GPU framework
+torch==2.7.1+cu128
+torchaudio==2.7.1+cu128
+triton==3.3.1
+
+# NeMo - preserve the project's tested streaming implementation
 nemo_toolkit[asr] @ git+https://github.com/NVIDIA/NeMo.git@73cfbcf9ce082a9754e3682f27096b6024bd7b8b
+
+# API
 fastapi==0.136.3
 uvicorn[standard]==0.49.0
 python-multipart==0.0.20
 websockets==16.0
+
+# Audio
 soundfile==0.14.0
 soxr==1.1.0
 numpy==2.4.6
+
+# Hugging Face
 huggingface_hub==1.18.0
