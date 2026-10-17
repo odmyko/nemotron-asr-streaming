@@ -36,12 +36,17 @@ RUN python -m pip install \
     torchaudio==2.7.1+cu128 \
     --index-url https://download.pytorch.org/whl/cu128
 
+# Triton compiles its CUDA driver helper when NeMo is first imported on GPU.
+RUN apt-get update && apt-get install -y --no-install-recommends gcc && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install NeMo and its dependencies.
 # Extra PyTorch index allows resolver to locate CUDA wheels.
-COPY requirements.txt /tmp/requirements.txt
+COPY requirements.txt requirements.lock.txt /tmp/
 
 RUN python -m pip install \
     -r /tmp/requirements.txt \
+    -r /tmp/requirements.lock.txt \
     --extra-index-url https://download.pytorch.org/whl/cu128
 
 # Validate dependency compatibility
@@ -59,8 +64,11 @@ RUN python -c "import torch; \
 # Application
 WORKDIR /app
 COPY app/ /app/app/
+COPY web/index.html /app/web/index.html
 
 ENV MODEL_PATH=/models/nemotron-3.5-asr-streaming-0.6b/nemotron-3.5-asr-streaming-0.6b.nemo \
+    DIAR_MODEL_PATH=/models/Nemotron-3-Diarization/Nemotron-3-Diarization.nemo \
+    TORCHINDUCTOR_COMPILE_THREADS=1 \
     ASR_DEVICE=cuda
 
 EXPOSE 8000

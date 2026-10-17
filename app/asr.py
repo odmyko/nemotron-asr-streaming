@@ -13,26 +13,23 @@ is both correct and cheap.
 from __future__ import annotations
 
 import os
-import re
 import threading
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
+
 import numpy as np
 import torch
+
+from .transcript import strip_lang_tags
 
 # Keep HF fully offline at runtime; everything we need is in the local cache.
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 import nemo.collections.asr as nemo_asr  # noqa: E402
-
-# Language tags the model emits after terminal punctuation, e.g. " <en-US>".
-_LANG_TAG_RE = re.compile(r"\s*<[a-zA-Z]{2,3}(?:-[a-zA-Z]{2,4})?>\s*")
-
-
-def strip_lang_tags(text: str) -> str:
-    return _LANG_TAG_RE.sub(" ", text).strip()
 
 
 @dataclass
@@ -89,7 +86,8 @@ class ASREngine:
         )
         self.model.eval()
         self.model.encoder.setup_streaming_params()
-        self.scfg = self.model.encoder.streaming_cfg
+        self.scfg = deepcopy(self.model.encoder.streaming_cfg)
+        self.context = list(self.model.encoder.att_context_size)
         self.compute_dtype = next(self.model.parameters()).dtype
         self.sample_rate = int(self.model.cfg.sample_rate)
         self.prompt_dictionary = dict(
@@ -119,6 +117,12 @@ class ASREngine:
         return lang in self.prompt_dictionary
 
     # -- feature extraction --------------------------------------------
+    def activate_context(self, context):
+        """Called under _lock: session caches require their original geometry."""
+        if list(self.model.encoder.att_context_size) != list(context):
+            self.model.encoder.set_default_att_context_size(context)
+            self.model.encoder.setup_streaming_params()
+
     def _features(self, raw: np.ndarray) -> torch.Tensor:
         sig = torch.from_numpy(raw).unsqueeze(0).to(self.device)
         length = torch.tensor([raw.shape[0]], device=self.device)
@@ -128,9 +132,13 @@ class ASREngine:
 
     # -- streaming core -------------------------------------------------
     def _run_session_steps(self, s: StreamingSession, flush: bool) -> List[str]:
+        if s._raw.size == 0:
+            return []
         scfg = self.scfg
         texts: List[str] = []
         with self._lock, torch.inference_mode():
+            self.activate_context(self.context)
+            self.model.decoding.set_strip_lang_tags(False)
             feats = self._features(s._raw)
             total = feats.size(-1)
             while True:
@@ -188,7 +196,9 @@ class ASREngine:
     def new_session(self, lang: str = "auto", strip_tags: bool = True) -> StreamingSession:
         if not self.is_supported_language(lang):
             raise ValueError(f"Unsupported language '{lang}'")
-        return StreamingSession(engine=self, lang=lang, strip_tags=strip_tags)
+        with self._lock:
+            self.activate_context(self.context)
+            return StreamingSession(engine=self, lang=lang, strip_tags=strip_tags)
 
     # -- one-shot file transcription -----------------------------------
     def transcribe_array(self, samples: np.ndarray, lang: str = "auto",

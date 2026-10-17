@@ -9,7 +9,7 @@ web UI, so you can open a page on your phone or laptop and watch words appear
 **as you speak**. Clone it and run one script.
 
 ```bash
-git clone git@github.com:tehtommeh/nemotron-asr-streaming.git
+git clone git@github.com:odmyko/nemotron-asr-streaming.git
 cd nemotron-asr-streaming
 ./run.sh
 # → http://localhost:8080   (mic in the browser, live transcription)
@@ -118,7 +118,7 @@ docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
 ## Quick start
 
 ```bash
-git clone git@github.com:tehtommeh/nemotron-asr-streaming.git
+git clone git@github.com:odmyko/nemotron-asr-streaming.git
 cd nemotron-asr-streaming
 ./run.sh
 ```
@@ -277,16 +277,14 @@ Environment variables (set in `docker-compose.yml` or your shell):
 
 ## Dependency versions & reproducibility
 
-- [`requirements.txt`](requirements.txt) — the install manifest used by the
-  Docker image and `scripts/dev.sh`. NeMo is pinned to an exact git commit;
-  torch is installed separately from the cu124 wheel index (see the Dockerfile /
-  `dev.sh`).
-- [`requirements.lock.txt`](requirements.lock.txt) — a full `uv pip freeze` of a
-  known-good environment (exact versions of every transitive dependency) for
-  reference / debugging.
+`requirements.txt` declares direct dependencies and pins NeMo Speech to commit
+`a3afbd901807bfa5b46ae386573af31dced77834`. `requirements.lock.txt` is the full
+Linux/Python 3.12 snapshot used by Docker (together with the direct manifest)
+and local development. CUDA wheels are resolved from the cu128 index.
 
-Key versions: `torch==2.6.0+cu124`, `nemo-toolkit @ git+…@73cfbcf`,
-`fastapi==0.136.3`, `uvicorn==0.49.0`, Python 3.12, CUDA 12.4.
+The GPU stack is PyTorch/torchaudio 2.7.1+cu128, Triton 3.3.1, and CUDA 12.8.
+Application packages are isolated in `/opt/venv`; the image runs `pip check`
+and verifies compiled SM120 support. GCC is required by Triton's runtime helper.
 
 ## Testing & validation
 
@@ -344,3 +342,101 @@ under **OpenMDW-1.1** — review the terms on the
 - NVIDIA NeMo & the Nemotron Speech team for the model and streaming toolkit.
 - Structure inspired by
   [vibevoice-asr-api](https://github.com/tehtommeh/vibevoice-asr-api).
+
+## Live speaker separation
+
+The **Separate speakers** checkbox is available on both `http://localhost:8080`
+and the API demo at `http://localhost:8000`. Enable it before Start. The page
+shows numbered speakers with consistent colors and updates their transcript
+while recording. Stop enters a finishing state until the server flushes the
+last audio. Clear clears displayed text without resetting speaker identities.
+
+Both models run inside the ASR container, using shared GPU weights and separate
+session caches. The implementation uses NVIDIA NeMo Speech's `SpeakerTaggedASR`
+with Nemotron 3.5 ASR and `nvidia/Nemotron-3-Diarization` (up to eight speakers).
+Ordinary transcription retains its original streaming context when the checkbox
+is off. Files are transcribed without diarization in this release.
+
+### Install or update
+
+`./run.sh` downloads both checkpoints before building. To update manually:
+
+```bash
+bash scripts/download_diarization.sh
+docker compose up -d --build
+```
+
+For Windows/PowerShell without host Python dependencies:
+
+```powershell
+docker run --rm --entrypoint sh -v "${PWD}:/work:ro" -v "${PWD}/model_cache:/work/model_cache" -w /work python:3.12-slim -c "pip install huggingface_hub==1.18.0 && python download_diarization.py"
+docker compose up -d --build
+```
+
+The diarization checkpoint adds about 199 MB on disk. Both models load from the
+read-only `/models` mount; runtime remains offline. Missing/broken diarization
+weights leave ordinary ASR available and disable the checkbox with an explanation.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DIAR_ENABLED` | `1` | Load the optional diarization model; set `0` to omit it and skip its bootstrap download. |
+| `DIAR_MODEL_PATH` | `/models/Nemotron-3-Diarization/Nemotron-3-Diarization.nemo` | Local checkpoint inside the container. |
+| `DIAR_MODEL_DIR` | `model_cache/Nemotron-3-Diarization` | Host download destination; update the volume/path if overridden. |
+
+Setting `DIAR_ENABLED=0` avoids loading the second model and saves GPU memory.
+The checkbox is still off by default when the model is available.
+
+### WebSocket extension
+
+Connect to `/ws/transcribe?language=auto&sample_rate=48000&diarize=true`.
+Audio remains mono little-endian PCM16. `ready`, `partial`, `final`, and `error`
+retain their existing meanings; `partial` and `final` include a complete snapshot:
+
+```json
+{"type":"partial","text":"Hello there","segments":[{"text":"Hello there","start":0.32,"end":1.12,"speaker_id":"speaker_0","final":false}]}
+```
+
+Replace the previous segments with each new snapshot; do not append snapshots.
+Times are seconds from the start of this connection. Text and timing can change
+until `final`. Speaker identities survive pauses but reset on a new connection.
+No names, persistent voice profiles, or recordings are stored. `/health` reports
+`diarization.available`, `detail`, `max_speakers`, and `buffer_seconds`.
+If a requested diarizer is unavailable, the server returns an explicit error.
+If inference fails, the UI preserves text already received.
+
+### Latency and limitations
+
+The coupled pipeline derives chunk geometry from ASR; `/health` reports the
+actual input buffer duration. This excludes compute, network, and initial model
+warmup/JIT compilation. Startup warms the diarizer before accepting connections;
+initial startup can take longer while Triton compiles GPU kernels. Compilation
+uses one worker (`TORCHINDUCTOR_COMPILE_THREADS=1`) to limit host memory usage.
+Diarization uses BF16 on supported CUDA devices to keep attention
+kernels within the RTX 5090 shared-memory limit.
+
+Speaker numbers are anonymous and local to a recording. Similar voices, noise,
+short interjections, and overlapping speech can cause incorrect attribution.
+The multilingual ASR model is preserved; changing languages does not deliberately
+create a new speaker. Accurate simultaneous transcription of overlapping voices
+is not guaranteed. Many active speakers increase GPU cost and total latency.
+
+### Verification
+
+```bash
+python -m unittest discover -s tests -v
+node tests/ui.cjs
+python scripts/validate_diarization.py
+python scripts/validate_diarization.py --audio dialog.wav --min-speakers 2
+python scripts/validate_diarization.py --audio dialog.wav --minutes 10 --realtime
+```
+
+Run Python checks in the built ASR environment. The GPU validator tests partials
+before Stop, final timestamps, repeated finalization, fresh-session isolation,
+and interleaving ordinary ASR with speaker-tagged ASR. It reports first partial,
+step duration, input-buffer size, and peak allocated GPU memory. Use mono 16 kHz
+audio and a real multi-speaker fixture to assess speaker accuracy.
+The Node check exercises UI lifecycle, revised snapshots, Clear, errors, safe text
+rendering and restart using simulated microphone/transport adapters.
+
+References: [NVIDIA ASR integration guide](https://huggingface.co/nvidia/Nemotron-3-Diarization/blob/main/ASR_INTEGRATION_GUIDE.md),
+[diarization model](https://huggingface.co/nvidia/Nemotron-3-Diarization).
