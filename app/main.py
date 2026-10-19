@@ -32,6 +32,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from .asr import ASREngine
 from .audio import StreamingResampler, decode_to_mono16k_async, pcm16_to_float32
+from .storage import save_transcript, transcript_record
 
 DEFAULT_MODEL_PATH = os.path.join(
     os.path.dirname(__file__), "..", "model_cache",
@@ -89,6 +90,16 @@ def _engine() -> ASREngine:
     return engine
 
 
+async def _backup(record):
+    try:
+        # Complete the disk write even if the client disconnects after Stop.
+        with anyio.CancelScope(shield=True):
+            return await anyio.to_thread.run_sync(save_transcript, record)
+    except Exception:
+        logging.getLogger(__name__).exception("Transcript backup failed")
+        return {"status": "error", "detail": "Server backup failed. Export your transcript to keep a copy."}
+
+
 @app.get("/health", tags=["meta"])
 async def health():
     if engine is None:
@@ -140,11 +151,17 @@ async def transcribe(
     text = await asyncio.to_thread(
         e.transcribe_array, samples, language, strip_lang_tags
     )
+    record = transcript_record(
+        text=text, language=language, duration_sec=round(samples.size / e.sample_rate, 3),
+        source="file", filename=file.filename,
+    )
     return {
         "text": text,
         "language": language,
         "duration_sec": round(samples.size / e.sample_rate, 3),
         "filename": file.filename,
+        "transcript_id": record["id"],
+        "backup": await _backup(record),
     }
 
 
@@ -174,6 +191,7 @@ async def ws_transcribe(
         return
     session = None
     disconnected = False
+    input_samples = 0
     try:
         factory = diarization.new_session if diarize else e.new_session
         session = await asyncio.to_thread(factory, lang=language, strip_tags=strip_lang_tags)
@@ -194,6 +212,7 @@ async def ws_transcribe(
                 break
             if (data := msg.get("bytes")) is not None:
                 samples = pcm16_to_float32(data)
+                input_samples += samples.size
                 samples = await asyncio.to_thread(resampler.process, samples)
                 outs = await asyncio.to_thread(session.add_audio, samples) if samples.size else []
                 if outs:
@@ -210,7 +229,15 @@ async def ws_transcribe(
                     if tail.size:
                         await asyncio.to_thread(session.add_audio, tail)
                     await asyncio.to_thread(session.finalize)
-                    await ws.send_json(result("final"))
+                    final = result("final")
+                    record = transcript_record(
+                        text=session.text, language=language, diarize=diarize,
+                        segments=final.get("segments"),
+                        duration_sec=round(input_samples / sample_rate, 3),
+                    )
+                    final["transcript_id"] = record["id"]
+                    final["backup"] = await _backup(record)
+                    await ws.send_json(final)
                     break
     except WebSocketDisconnect:
         disconnected = True

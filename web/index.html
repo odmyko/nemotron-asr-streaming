@@ -23,6 +23,8 @@
          color:#fff;cursor:pointer;flex:1;min-width:120px}
   button:disabled{opacity:.4;cursor:not-allowed}
   #start{background:var(--green)} #stop{background:var(--red)} #clear{background:#39406a}
+  .exports button{background:#39406a;padding:.55rem .8rem;font-size:.9rem;min-width:90px}
+  #backupStatus{color:var(--muted);font-size:.8rem;min-height:1.2em}
   .status{display:flex;align-items:center;gap:.5rem;color:var(--muted);font-size:.9rem;margin-bottom:.4rem}
   .dot{width:.7rem;height:.7rem;border-radius:50%;background:#555;transition:.2s}
   .dot.live{background:var(--green);box-shadow:0 0 0 0 rgba(46,204,113,.6);animation:pulse 1.3s infinite}
@@ -60,6 +62,12 @@
   </div>
   <div class="status"><span id="dot" class="dot"></span><span id="statusText">idle</span></div>
   <div id="transcript"></div>
+  <div class="btns exports" aria-label="Export visible transcript">
+    <button id="exportTxt" disabled>Export TXT</button>
+    <button id="exportMd" disabled>Export MD</button>
+    <button id="exportJson" disabled>Export JSON</button>
+  </div>
+  <div id="backupStatus" role="status" aria-live="polite"></div>
   <div class="hint" id="hint">Speaker labels belong to this recording. They may update as you speak.</div>
   <div class="upload">
     <label>Audio file (plain transcription): <input type="file" id="fileInput" accept="audio/*"></label>
@@ -74,6 +82,56 @@ const transcript=$('#transcript'), hint=$('#hint'), uploadBtn=$('#upload');
 const colors=['#73a7ff','#6edbae','#ffbf73','#dc9bff','#ff8caa','#73dbe0','#cedb73','#c7b3a0'];
 let state='idle', active=null, history=[], current=[], clearPoint=0, diarAvailable=false;
 let serverReady=false, languagesLoaded=false;
+let recordingNumber=0;
+function visibleSegments(){
+  return [...history,...current].filter(s=>!s.hidden).map(s=>{
+    const {hidden,clearChars,...segment}=s;
+    return {...segment,text:segment.text.slice(clearChars||0)};
+  }).filter(s=>s.text);
+}
+function speakerLabel(segment){
+  return segment.speaker_id?`Speaker ${Number(segment.speaker_id.split('_').pop())+1}`:'';
+}
+function exportTranscript(format){
+  const segments=visibleSegments();if(!segments.length)return;
+  const exported_at=new Date().toISOString();
+  const text=segments.map(s=>s.text).join('\n\n');
+  let content;
+  if(format==='json')content=JSON.stringify({schema_version:1,exported_at,text,segments},null,2)+'\n';
+  else{
+    const escapeMd=text=>text.replace(/[\\`*_{}\[\]<>#+.!|~\-]/g,'\\$&');
+    const multiple=new Set(segments.map(s=>s.recording_id)).size>1;
+    let previous=null,number=0;
+    const lines=[];
+    if(format==='md')lines.push('# Transcript');
+    for(const segment of segments){
+      if(segment.recording_id!==previous){
+        previous=segment.recording_id;number++;
+        if(multiple)lines.push((format==='md'?'## ':'')+`Recording ${number}`);
+      }
+      const speaker=speakerLabel(segment);
+      const timing=Number.isFinite(segment.start)&&Number.isFinite(segment.end)?
+        ` [${segment.start.toFixed(2)}–${segment.end.toFixed(2)}s]`:'';
+      if(format==='md')lines.push((speaker?`**${speaker}${timing}:**\n\n`:'')+escapeMd(segment.text));
+      else lines.push((speaker?`${speaker}${timing}: `:'')+segment.text);
+    }
+    content=lines.join('\n\n')+'\n';
+  }
+  const types={txt:'text/plain',md:'text/markdown',json:'application/json'};
+  const url=URL.createObjectURL(new Blob([content],{type:types[format]+';charset=utf-8'}));
+  const link=document.createElement('a');link.href=url;
+  link.download=`transcript-${exported_at.replace(/[:.]/g,'-')}.${format}`;
+  document.body.appendChild(link);link.click();link.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+for(const format of ['txt','md','json'])$('#export'+format[0].toUpperCase()+format.slice(1)).onclick=()=>exportTranscript(format);
+function showBackup(backup){
+  const status=$('#backupStatus');
+  status.textContent=backup?.status==='saved'?'Saved on server: '+backup.filename:
+    backup?.status==='error'?'Server backup failed. Export the transcript to keep a copy.':
+    backup?.status==='disabled'?'Server autosave is disabled.':'Server did not confirm a backup. Export the transcript to keep a copy.';
+  status.style.color=backup?.status==='error'?'var(--red)':'';
+}
 function setStatus(text, cls=''){statusText.textContent=text;dot.className='dot '+cls;}
 function controls(){
   const busy=state!=='idle';
@@ -101,11 +159,14 @@ function render(){
   }
   transcript.replaceChildren(fragment);
   transcript.scrollTop=follow?transcript.scrollHeight:oldScroll;
+  for(const format of ['Txt','Md','Json'])$('#export'+format).disabled=!visibleSegments().length;
 }
 function updateTranscript(message){
   const incoming=Array.isArray(message.segments)?message.segments:
     [{text:message.text||'',speaker_id:null,final:message.type==='final'}];
-  current=incoming.map((s,i)=>({...s,final:message.type==='final'||s.final,
+  current=incoming.map((s,i)=>({...s,final:message.type==='final'||!!s.final,
+    recording_id:message.transcript_id||active?.recording_id,language:active?.language,
+    source:'microphone',
     hidden:i<clearPoint,clearChars:i===clearPoint?(active?.clearChars||0):0}));
   render();
 }
@@ -122,7 +183,10 @@ function finish(session,error){
   history.push(...current);current=[];
   active=null;state='idle';clearPoint=0;
   controls();setStatus(error?'error':'stopped',error?'err':'');
-  if(error)hint.textContent=error;
+  if(error){
+    hint.textContent=error;
+    $('#backupStatus').textContent='Recording interrupted. Server backup is not confirmed; export the displayed text.';
+  }
   render();
 }
 function pcm16(samples){
@@ -138,7 +202,9 @@ async function start(){
   if(!navigator.mediaDevices?.getUserMedia){
     setStatus('Microphone requires localhost or HTTPS','err');return;
   }
-  const session={};active=session;state='connecting';controls();setStatus('requesting microphone...','wait');
+  const session={recording_id:`recording-${++recordingNumber}`,language:langSel.value};
+  active=session;state='connecting';controls();setStatus('requesting microphone...','wait');
+  $('#backupStatus').textContent='Recording will be saved on the server after Stop.';
   hint.textContent='Speaker labels belong to this recording and may update as you speak.';
   clearPoint=0;current=[];
   try{
@@ -167,7 +233,7 @@ async function start(){
         state='recording';controls();setStatus('listening...','live');
       }else if(message.type==='partial'||message.type==='final'){
         updateTranscript(message);
-        if(message.type==='final'){finish(session);session.ws.close();}
+        if(message.type==='final'){showBackup(message.backup);finish(session);session.ws.close();}
       }else if(message.type==='error'){
         finish(session,message.detail||'Transcription failed');session.ws.close();
       }
@@ -202,7 +268,9 @@ uploadBtn.onclick=async()=>{
   try{
     const response=await fetch('/transcribe',{method:'POST',body});const result=await response.json();
     if(!response.ok)throw new Error(result.detail||'Upload failed');
-    history.push({text:result.text,final:true});render();setStatus('file transcribed');
+    history.push({text:result.text,final:true,recording_id:result.transcript_id||`recording-${++recordingNumber}`,
+      language:langSel.value,source:'file',filename:file.name});
+    showBackup(result.backup);render();setStatus('file transcribed');
   }catch(error){setStatus('error','err');hint.textContent=String(error);}
   finally{state='idle';controls();}
 };
