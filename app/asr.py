@@ -29,6 +29,14 @@ from .transcript import strip_lang_tags
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
+# NeMo detects installed GPU libraries even in a CUDA image running without a
+# GPU. Triton's import-time autotuners then fail before a CPU model can load.
+if os.environ.get("ASR_DEVICE", "").startswith("cpu") or not torch.cuda.is_available():
+    from nemo.core.utils import optional_libs
+
+    optional_libs.TRITON_AVAILABLE = False
+    optional_libs.CUDA_PYTHON_AVAILABLE = False
+
 import nemo.collections.asr as nemo_asr  # noqa: E402
 
 
@@ -79,7 +87,8 @@ class StreamingSession:
 
 
 class ASREngine:
-    def __init__(self, model_path: str, device: str = "cuda"):
+    def __init__(self, model_path: str, device: str | None = None):
+        device = device or os.environ.get("ASR_DEVICE") or ("cuda" if torch.cuda.is_available() else "cpu")
         self.device = device
         self.model = nemo_asr.models.ASRModel.restore_from(
             restore_path=model_path, map_location=device
