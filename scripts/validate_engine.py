@@ -25,3 +25,4 @@ final = s.finalize()
 print("\nFINAL :", repr(final))
 print("EXPECT:", repr(EXPECTED))
 print("\nMATCH:", final == EXPECTED)
+assert final == EXPECTED, "Streaming ASR regression: output differs from the reference fixture"

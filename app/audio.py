@@ -10,6 +10,22 @@ import numpy as np
 TARGET_SR = 16000
 
 
+class StreamingResampler:
+    """One resampler per connection; retain filter history and flush its tail."""
+
+    def __init__(self, orig_sr: int, target_sr: int = TARGET_SR):
+        self._stream = None
+        if orig_sr != target_sr:
+            import soxr
+
+            self._stream = soxr.ResampleStream(orig_sr, target_sr, 1, dtype="float32")
+
+    def process(self, samples: np.ndarray, *, final: bool = False) -> np.ndarray:
+        if self._stream is None:
+            return samples
+        return self._stream.resample_chunk(samples, last=final)
+
+
 def decode_to_mono16k(data: bytes, target_sr: int = TARGET_SR) -> np.ndarray:
     """Decode arbitrary audio bytes (wav/flac/ogg/mp3/webm/opus/...) to mono
     float32 [-1, 1] at ``target_sr`` using ffmpeg. Returns a 1-D numpy array."""

@@ -10,6 +10,8 @@ services:
     environment:
       MODEL_PATH: /models/nemotron-3.5-asr-streaming-0.6b/nemotron-3.5-asr-streaming-0.6b.nemo
       ASR_DEVICE: cuda
+      DIAR_MODEL_PATH: /models/Nemotron-3-Diarization/Nemotron-3-Diarization.nemo
+      DIAR_ENABLED: ${DIAR_ENABLED:-1}
     gpus: all
     restart: unless-stopped
     healthcheck:

@@ -15,15 +15,19 @@ fi
 echo "==> Installing build deps"
 uv pip install --python .venv/bin/python Cython packaging setuptools wheel
 
-echo "==> Installing CUDA torch (cu124)"
-uv pip install --python .venv/bin/python torch==2.6.0 torchaudio==2.6.0 \
-  --index-url https://download.pytorch.org/whl/cu124
+echo "==> Installing CUDA torch (cu128)"
+uv pip install --python .venv/bin/python torch==2.7.1+cu128 torchaudio==2.7.1+cu128 \
+  --index-url https://download.pytorch.org/whl/cu128
 
 echo "==> Installing NeMo (git) + serving deps"
-uv pip install --python .venv/bin/python -r requirements.txt
+uv pip install --python .venv/bin/python -r requirements.lock.txt \
+  --extra-index-url https://download.pytorch.org/whl/cu128
 
 echo "==> Fetching model weights"
 bash scripts/download_model.sh
+if [[ "${DIAR_ENABLED:-1}" != "0" ]]; then
+  bash scripts/download_diarization.sh
+fi
 
 echo "==> Starting API on http://0.0.0.0:8000  (Ctrl-C to stop)"
 exec .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

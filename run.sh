@@ -27,6 +27,9 @@ fi
 
 bold "==> Fetching model weights (idempotent)"
 bash scripts/download_model.sh
+if [[ "${DIAR_ENABLED:-1}" != "0" ]]; then
+  bash scripts/download_diarization.sh
+fi
 
 bold "==> Building & starting containers"
 docker compose up -d --build

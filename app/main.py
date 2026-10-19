@@ -13,18 +13,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+# Prevent parallel compiler workers from exhausting Docker Desktop host memory.
+os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
+
+import numpy as np
 import torch
+import anyio
 from fastapi import (
     FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from .asr import ASREngine
-from .audio import decode_to_mono16k_async, pcm16_to_float32, resample
+from .audio import StreamingResampler, decode_to_mono16k_async, pcm16_to_float32
 
 DEFAULT_MODEL_PATH = os.path.join(
     os.path.dirname(__file__), "..", "model_cache",
@@ -32,15 +39,36 @@ DEFAULT_MODEL_PATH = os.path.join(
 )
 MODEL_PATH = os.environ.get("MODEL_PATH", DEFAULT_MODEL_PATH)
 DEVICE = os.environ.get("ASR_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
+DIAR_MODEL_PATH = os.environ.get(
+    "DIAR_MODEL_PATH", str(Path(__file__).resolve().parent.parent /
+                           "model_cache/Nemotron-3-Diarization/Nemotron-3-Diarization.nemo"),
+)
 
 engine: ASREngine | None = None
+diarization = None
+diarization_error = "Diarization is disabled."
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global engine
+    global engine, diarization, diarization_error
+    diarization = None
+    diarization_error = "Diarization is disabled."
     engine = ASREngine(MODEL_PATH, device=DEVICE)
+    if os.environ.get("DIAR_ENABLED", "1").lower() not in ("0", "false", "no"):
+        try:
+            from .diarization import DiarizationEngine
+
+            diarization = DiarizationEngine(engine, DIAR_MODEL_PATH)
+            await asyncio.to_thread(diarization.warmup)
+            diarization_error = None
+        except Exception as exc:
+            diarization = None
+            logging.getLogger(__name__).exception("Diarization unavailable; ordinary ASR remains enabled")
+            diarization_error = str(exc)
+    await asyncio.to_thread(engine.warmup)
     yield
+    diarization = None
     engine = None
 
 
@@ -73,6 +101,12 @@ async def health():
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "sample_rate": engine.sample_rate,
         "num_languages": len(engine.languages),
+        "diarization": {
+            "available": diarization is not None,
+            "detail": diarization_error,
+            "max_speakers": 8,
+            "buffer_seconds": diarization.buffer_seconds if diarization else None,
+        },
     }
 
 
@@ -118,8 +152,9 @@ async def transcribe(
 async def ws_transcribe(
     ws: WebSocket,
     language: str = Query("auto"),
-    sample_rate: int = Query(16000, description="Sample rate of the PCM you send."),
+    sample_rate: int = Query(16000, ge=8000, le=192000, description="Sample rate of the PCM you send."),
     strip_lang_tags: bool = Query(True),
+    diarize: bool = Query(False),
 ):
     """Streaming ASR.
 
@@ -133,109 +168,72 @@ async def ws_transcribe(
         await ws.send_json({"type": "error", "detail": f"Unsupported language '{language}'"})
         await ws.close()
         return
-    session = e.new_session(lang=language, strip_tags=strip_lang_tags)
-    await ws.send_json({"type": "ready", "language": language,
-                        "model_sample_rate": e.sample_rate, "input_sample_rate": sample_rate})
+    if diarize and diarization is None:
+        await ws.send_json({"type": "error", "detail": diarization_error or "Diarization unavailable"})
+        await ws.close(code=1013)
+        return
+    session = None
+    disconnected = False
     try:
+        factory = diarization.new_session if diarize else e.new_session
+        session = await asyncio.to_thread(factory, lang=language, strip_tags=strip_lang_tags)
+        resampler = StreamingResampler(sample_rate, e.sample_rate)
+        await ws.send_json({"type": "ready", "language": language, "diarize": diarize,
+                            "model_sample_rate": e.sample_rate, "input_sample_rate": sample_rate})
+
+        def result(kind):
+            message = {"type": kind, "text": session.text}
+            if diarize:
+                message["segments"] = session.segments
+            return message
+
         while True:
             msg = await ws.receive()
             if msg.get("type") == "websocket.disconnect":
+                disconnected = True
                 break
             if (data := msg.get("bytes")) is not None:
                 samples = pcm16_to_float32(data)
-                if sample_rate != e.sample_rate:
-                    samples = await asyncio.to_thread(resample, samples, sample_rate, e.sample_rate)
-                outs = await asyncio.to_thread(session.add_audio, samples)
+                samples = await asyncio.to_thread(resampler.process, samples)
+                outs = await asyncio.to_thread(session.add_audio, samples) if samples.size else []
                 if outs:
-                    await ws.send_json({"type": "partial", "text": outs[-1]})
+                    await ws.send_json(result("partial"))
             elif (text := msg.get("text")) is not None:
                 try:
                     ctrl = json.loads(text)
                 except json.JSONDecodeError:
                     ctrl = {"type": text.strip()}
-                if ctrl.get("type") in ("end", "finalize", "stop"):
-                    final = await asyncio.to_thread(session.finalize)
-                    await ws.send_json({"type": "final", "text": final})
+                if isinstance(ctrl, dict) and ctrl.get("type") in ("end", "finalize", "stop"):
+                    tail = await asyncio.to_thread(
+                        resampler.process, np.zeros(0, dtype=np.float32), final=True,
+                    )
+                    if tail.size:
+                        await asyncio.to_thread(session.add_audio, tail)
+                    await asyncio.to_thread(session.finalize)
+                    await ws.send_json(result("final"))
                     break
     except WebSocketDisconnect:
-        pass
+        disconnected = True
+    except Exception:
+        logging.getLogger(__name__).exception("Streaming transcription failed")
+        if not disconnected:
+            try:
+                await ws.send_json({"type": "error", "detail": "Transcription failed. Check server logs; your displayed text is preserved."})
+            except RuntimeError:
+                pass
     finally:
-        if not session.finished:
-            await asyncio.to_thread(session.finalize)
+        if session is not None and hasattr(session, "close"):
+            # ASGI servers cancel disconnected handlers. Shield cleanup so the
+            # queued GPU operation finishes before its session caches are freed.
+            with anyio.CancelScope(shield=True):
+                await anyio.to_thread.run_sync(session.close)
         try:
             await ws.close()
         except RuntimeError:
             pass
 
 
-@app.get("/", response_class=HTMLResponse, tags=["meta"])
+@app.get("/", response_class=FileResponse, tags=["meta"])
 async def index():
-    return HTMLResponse(INDEX_HTML)
-
-
-INDEX_HTML = """<!doctype html>
-<html><head><meta charset="utf-8"><title>Nemotron 3.5 ASR Streaming</title>
-<style>
- body{font-family:system-ui,sans-serif;max-width:820px;margin:2rem auto;padding:0 1rem;color:#111}
- h1{font-size:1.4rem} button{font-size:1rem;padding:.5rem 1rem;margin-right:.5rem;cursor:pointer}
- #out{white-space:pre-wrap;border:1px solid #ccc;border-radius:8px;padding:1rem;min-height:5rem;margin-top:1rem}
- .row{margin:.8rem 0} select,input{font-size:1rem;padding:.3rem}
- a{color:#06c} .muted{color:#666;font-size:.9rem}
-</style></head><body>
-<h1>Nemotron 3.5 ASR — streaming demo</h1>
-<p class="muted">Cache-aware FastConformer-RNNT on GPU. See the
- <a href="/docs">API docs</a>. WebSocket endpoint: <code>/ws/transcribe</code>.</p>
-<div class="row">
-  Language: <select id="lang"><option value="auto">auto</option></select>
-  <label><input type="checkbox" id="strip" checked> strip lang tags</label>
-</div>
-<div class="row">
-  <button id="start">🎤 Start mic streaming</button>
-  <button id="stop" disabled>⏹ Stop</button>
-</div>
-<div class="row">
-  <input type="file" id="fileInput" accept="audio/*">
-  <button id="upload">Transcribe file</button>
-</div>
-<div id="out"></div>
-<script>
-const out=document.getElementById('out'), langSel=document.getElementById('lang');
-fetch('/languages').then(r=>r.json()).then(d=>{
-  for(const l of d.languages){ if(l==='auto')continue;
-    const o=document.createElement('option');o.value=o.textContent=l;langSel.appendChild(o);} });
-let ws,ctx,proc,src,stream;
-function pcm16(f32){const b=new Int16Array(f32.length);
-  for(let i=0;i<f32.length;i++){let s=Math.max(-1,Math.min(1,f32[i]));b[i]=s<0?s*0x8000:s*0x7fff;}return b;}
-document.getElementById('start').onclick=async()=>{
-  out.textContent=''; stream=await navigator.mediaDevices.getUserMedia({audio:true});
-  ctx=new (window.AudioContext||window.webkitAudioContext)();
-  const sr=ctx.sampleRate, strip=document.getElementById('strip').checked;
-  const proto=location.protocol==='https:'?'wss':'ws';
-  ws=new WebSocket(`${proto}://${location.host}/ws/transcribe?language=${langSel.value}&sample_rate=${sr}&strip_lang_tags=${strip}`);
-  ws.binaryType='arraybuffer';
-  ws.onmessage=e=>{const m=JSON.parse(e.data);
-    if(m.type==='partial'||m.type==='final')out.textContent=m.text;
-    if(m.type==='error')out.textContent='ERROR: '+m.detail;};
-  ws.onopen=()=>{src=ctx.createMediaStreamSource(stream);
-    proc=ctx.createScriptProcessor(4096,1,1);
-    proc.onaudioprocess=ev=>{if(ws.readyState===1)
-      ws.send(pcm16(ev.inputBuffer.getChannelData(0)).buffer);};
-    src.connect(proc);proc.connect(ctx.destination);};
-  document.getElementById('start').disabled=true;document.getElementById('stop').disabled=false;
-};
-document.getElementById('stop').onclick=()=>{
-  if(proc){proc.disconnect();src.disconnect();}
-  if(stream)stream.getTracks().forEach(t=>t.stop());
-  if(ctx)ctx.close();
-  if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'end'}));
-  document.getElementById('start').disabled=false;document.getElementById('stop').disabled=true;
-};
-document.getElementById('upload').onclick=async()=>{
-  const f=document.getElementById('fileInput').files[0]; if(!f){out.textContent='Pick a file first.';return;}
-  out.textContent='Transcribing '+f.name+' …';
-  const fd=new FormData();fd.append('file',f);fd.append('language',langSel.value);
-  fd.append('strip_lang_tags',document.getElementById('strip').checked);
-  const r=await fetch('/transcribe',{method:'POST',body:fd});
-  const d=await r.json(); out.textContent=r.ok?d.text:('ERROR: '+(d.detail||JSON.stringify(d)));
-};
-</script></body></html>"""
+    # Both ports serve the same UI, including file upload and live diarization.
+    return FileResponse(Path(__file__).resolve().parent.parent / "web/index.html")

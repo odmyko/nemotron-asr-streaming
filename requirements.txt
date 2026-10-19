@@ -7,8 +7,8 @@ torch==2.7.1+cu128
 torchaudio==2.7.1+cu128
 triton==3.3.1
 
-# NeMo - preserve the project's tested streaming implementation
-nemo_toolkit[asr] @ git+https://github.com/NVIDIA/NeMo.git@73cfbcf9ce082a9754e3682f27096b6024bd7b8b
+# NeMo Speech: prompt-conditioned ASR + SpeakerTaggedASR / Nemotron diarization.
+nemo_toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech.git@a3afbd901807bfa5b46ae386573af31dced77834
 
 # API
 fastapi==0.136.3
