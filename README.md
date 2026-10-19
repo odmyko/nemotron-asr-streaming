@@ -266,6 +266,14 @@ Then in another shell:
 
 ## Configuration
 
+### CPU execution
+
+Set `ASR_DEVICE: cpu` in the ASR service environment and remove `gpus: all`
+from that service. The current Compose configuration defaults `ASR_DEVICE` to
+`cpu`; setting the `ASR_DEVICE` environment variable overrides it. To return to
+GPU execution, set `ASR_DEVICE=cuda` and restore `gpus: all`.
+Rebuild/recreate the services with `docker compose up -d --build`.
+
 Environment variables (set in `docker-compose.yml` or your shell):
 
 | Variable       | Default                                   | Used by | Meaning                          |
