@@ -1,10 +1,13 @@
 """Transport contract tests with a deterministic recognizer, no model downloads."""
 import importlib
+import os
 import sys
+import tempfile
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+from pathlib import Path
 
 import numpy as np
 from fastapi.testclient import TestClient
@@ -39,6 +42,12 @@ class WebsocketTests(unittest.TestCase):
             cls.api = importlib.import_module("app.main")
 
     def setUp(self):
+        self.backups = tempfile.TemporaryDirectory()
+        self.addCleanup(self.backups.cleanup)
+        environment = patch.dict(os.environ, {"TRANSCRIPT_DIR": self.backups.name,
+                                             "TRANSCRIPT_SAVE_ENABLED": "1"})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.sessions = []
 
         def factory(**kwargs):
@@ -59,11 +68,20 @@ class WebsocketTests(unittest.TestCase):
                 partial = ws.receive_json()
                 self.assertEqual(partial["type"], "partial")
                 self.assertEqual("segments" in partial, diarize)
+                saved_before = len(list(Path(self.backups.name).glob("*.txt")))
                 ws.send_json({"type": "end"})
                 final = ws.receive_json()
                 self.assertEqual(final["type"], "final")
+                self.assertEqual(final["backup"]["status"], "saved")
+                saved = (Path(self.backups.name) / final["backup"]["filename"]).read_text(encoding="utf-8")
+                self.assertIn(final["text"], saved)
+                self.assertIn(final["transcript_id"], final["backup"]["filename"])
+                self.assertEqual(len(list(Path(self.backups.name).glob("*.txt"))), saved_before + 1)
                 if diarize:
                     self.assertTrue(final["segments"][0]["final"])
+                    self.assertEqual(saved, "Speaker 1 [0.00–0.10s]: live text\n")
+                else:
+                    self.assertEqual(saved, "live text\n")
             self.assertTrue(self.sessions[-1].finished)
             self.assertTrue(self.sessions[-1].closed)
 
@@ -82,6 +100,30 @@ class WebsocketTests(unittest.TestCase):
             ws.receive_json()
         self.assertTrue(self.sessions[-1].closed)
         self.assertFalse(self.sessions[-1].finished)
+        self.assertEqual(list(Path(self.backups.name).iterdir()), [])
+
+    def test_backup_failure_preserves_final_transcript(self):
+        with patch.object(self.api, "save_transcript", side_effect=OSError("Disk full")):
+            with self.client.websocket_connect("/ws/transcribe") as ws:
+                ws.receive_json()
+                ws.send_bytes(np.zeros(5120, dtype="<i2").tobytes())
+                ws.receive_json()
+                ws.send_json({"type": "end"})
+                final = ws.receive_json()
+        self.assertEqual(final["type"], "final")
+        self.assertEqual(final["text"], "live text")
+        self.assertEqual(final["backup"]["status"], "error")
+
+    def test_uploaded_file_is_backed_up(self):
+        self.api.engine.transcribe_array = lambda *args: "Привет, світ!"
+        with patch.object(self.api, "decode_to_mono16k_async", new=AsyncMock(return_value=np.zeros(16000))):
+            response = self.client.post("/transcribe", files={"file": ("../../example.wav", b"audio")})
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        saved = (Path(self.backups.name) / result["backup"]["filename"]).read_text(encoding="utf-8")
+        self.assertEqual(saved, "Привет, світ!\n")
+        self.assertTrue(result["backup"]["filename"].endswith(".txt"))
+        self.assertNotIn("example", result["backup"]["filename"])
 
     def test_cancelled_handler_waits_for_inflight_operation_before_cleanup(self):
         started, release = threading.Event(), threading.Event()

@@ -1,5 +1,6 @@
 .venv/
 model_cache/
+transcripts/
 scripts/
 test_data/
 __pycache__/

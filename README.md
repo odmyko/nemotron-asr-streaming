@@ -400,7 +400,8 @@ retain their existing meanings; `partial` and `final` include a complete snapsho
 Replace the previous segments with each new snapshot; do not append snapshots.
 Times are seconds from the start of this connection. Text and timing can change
 until `final`. Speaker identities survive pauses but reset on a new connection.
-No names, persistent voice profiles, or recordings are stored. `/health` reports
+No names, persistent voice profiles, or audio recordings are stored. Completed
+text transcripts are backed up as described below. `/health` reports
 `diarization.available`, `detail`, `max_speakers`, and `buffer_seconds`.
 If a requested diarizer is unavailable, the server returns an explicit error.
 If inference fails, the UI preserves text already received.
@@ -448,3 +449,41 @@ Save a full transcript/metrics artifact with `--report model_cache/validation/re
 
 References: [NVIDIA ASR integration guide](https://huggingface.co/nvidia/Nemotron-3-Diarization/blob/main/ASR_INTEGRATION_GUIDE.md),
 [diarization model](https://huggingface.co/nvidia/Nemotron-3-Diarization).
+
+## Transcript exports and automatic backups
+
+Use **Export TXT**, **Export MD**, or **Export JSON** below the transcript to
+download the currently visible text. Exports work for microphone recordings and
+uploaded files, with or without speaker separation. They also work during a
+recording or after an error; unfinished segments remain marked `final: false`
+in JSON. TXT and Markdown include speaker labels and available timestamps.
+JSON preserves segment timestamps, speaker IDs, language, source, and recording
+IDs. Separate recording IDs distinguish speakers whose numbering restarts in
+each recording. Clear removes text from browser exports.
+
+After **Stop**, the server flushes the remaining audio, finalizes recognition,
+and automatically writes a complete UTF-8 TXT transcript. Speaker turns include
+readable labels and timestamps; ordinary transcripts contain plain text. Successful file
+uploads are saved too. Each result has its own unique filename. The UI confirms
+the save or warns if the disk write failed, while keeping the transcript
+available for export. The final WebSocket response and upload response include
+`transcript_id` and `backup` (`status`: `saved`, `disabled`, or `error`;
+`filename` is present when saved).
+
+Docker Compose mounts **`./transcripts` on the host** at `/transcripts` in the
+ASR container, so backups survive container recreation. Rebuild/recreate the
+services after updating: `docker compose up -d --build`. For local development,
+the default directory is `transcripts` relative to the server working directory.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TRANSCRIPT_SAVE_ENABLED` | `1` | Set `0` to disable automatic transcript backups. |
+| `TRANSCRIPT_DIR` | `transcripts` (`/transcripts` in Compose) | Server directory for TXT backups; must be writable. |
+
+Backups contain the complete transcript for one recording, including text
+hidden in the browser by Clear. They never store audio. Use browser JSON export
+when structured segment metadata is needed. Existing JSON backups are left untouched.
+They are excluded from Git and Docker build context. Files remain until you
+delete them; there is no automatic retention policy or web download endpoint.
+An interrupted connection or server crash before finalization does not create
+a completed backup; export any partial text still displayed in the browser.

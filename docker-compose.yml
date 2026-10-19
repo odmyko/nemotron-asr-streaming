@@ -7,11 +7,14 @@ services:
       - "8000:8000"          # reachable on 0.0.0.0 -> other devices on the LAN
     volumes:
       - ./model_cache:/models:ro
+      - ./transcripts:/transcripts
     environment:
       MODEL_PATH: /models/nemotron-3.5-asr-streaming-0.6b/nemotron-3.5-asr-streaming-0.6b.nemo
       ASR_DEVICE: cuda
       DIAR_MODEL_PATH: /models/Nemotron-3-Diarization/Nemotron-3-Diarization.nemo
       DIAR_ENABLED: ${DIAR_ENABLED:-1}
+      TRANSCRIPT_DIR: /transcripts
+      TRANSCRIPT_SAVE_ENABLED: ${TRANSCRIPT_SAVE_ENABLED:-1}
     gpus: all
     restart: unless-stopped
     healthcheck:
